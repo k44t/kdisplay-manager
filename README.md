@@ -23,6 +23,29 @@ When selecting a configuration for application, kdisplay-manager filters through
   Same as "most-monitors" except that the list is not filtered by the number of monitors.
 
 
+## Install
+
+Install the package globally with npm:
+
+```bash
+npm install -g kdisplay-manager
+```
+
+This package includes `kdisplay-manager.service` (systemd user service configuration file) and an install helper script. After a global install, run:
+
+```bash
+node "$(npm root -g)/kdisplay-manager/install.js"
+```
+
+That links the service unit into the user's systemd configuration. After that, reload and enable it:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now kdisplay-manager.service
+```
+
+Instead of using the install helper feel free to adapt `kdisplay-manager.service` to your needs.
+
 ## Commands
 
 The package installs the `kdisplay-manager` executable.
@@ -177,24 +200,6 @@ The service stores recent config state under the user's XDG state directory, typ
 ```text
 ~/.local/state/kdisplay-manager/recent-configs.txt
 ```
-
-## Systemd User Service
-
-This package includes `kdisplay-manager.service` (systemd user service configuration file) and an install helper:
-
-```bash
-npm run install:user-service
-```
-
-
-That links the service unit into the user's systemd configuration. After that, reload and enable it:
-
-```bash
-systemctl --user daemon-reload
-systemctl --user enable --now kdisplay-manager.service
-```
-
-Instead of using the install helper feel free to adapt `kdisplay-manager.service` to your needs.
 
 ## License
 
