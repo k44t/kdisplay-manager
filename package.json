@@ -1,0 +1,22 @@
+{
+	"name": "kdisplay-manager",
+	"version": "0.1.0",
+	"license": "MIT",
+	"type": "module",
+	"bin": {
+		"kdisplay-manager": "./kdisplay-manager.js"
+	},
+	"files": [
+		"*.js",
+		"*.service",
+		"LICENSE"
+	],
+	"scripts": {
+		"install:user-service": "node ./install.js"
+	},
+	"dependencies": {
+		"argparse": "^2.0.1",
+		"dbus-next": "^0.10.2",
+		"xdg-basedir": "^5.1.0"
+	}
+}

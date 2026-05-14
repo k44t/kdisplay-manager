@@ -1,0 +1,14 @@
+.vscode/
+*.code-workspace
+*.code-workspace.bak
+/#*/
+
+# npm
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# misc
+.DS_Store
