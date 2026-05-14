@@ -46,7 +46,11 @@ systemctl --user enable --now kdisplay-manager.service
 
 Instead of using the install helper feel free to adapt `kdisplay-manager.service` to your needs.
 
-## Commands
+## Run
+
+The common way to run the service is through the installed `systemd` user unit.
+
+The commands below are for running `kdisplay-manager` manually.
 
 The package installs the `kdisplay-manager` executable.
 
@@ -71,6 +75,10 @@ kdisplay-manager apply <config_name> --state-dir /path/to/state
 ```
 
 ### Run the display manager service
+
+For normal use, prefer enabling and starting `kdisplay-manager.service` with `systemd --user` instead of running the service command directly.
+
+Manual usage:
 
 ```bash
 kdisplay-manager service --apply-on-start
