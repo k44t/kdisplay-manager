@@ -77,7 +77,7 @@ function chooseConfigName(availableConfigNames, recentConfigNames, selectionStra
 
 
 function getConfigMonitorCount(config){
-	return getConfigMonitorNames(config).length;
+	return getConfigMonitorNames(config, {requiredOnly: true}).length;
 }
 
 
@@ -366,7 +366,8 @@ class DisplayManagerService {
 
 		console.log('[display-manager service] applying', configName, 'for', reason);
 		await runApplyCommand(configName, false, {
-			configDir: this.options.configDir
+			configDir: this.options.configDir,
+			stateDir: this.options.stateDir
 		});
 	}
 }

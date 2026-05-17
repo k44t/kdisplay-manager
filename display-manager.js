@@ -3,7 +3,15 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import {getConfigDirPath, getStateDirPath, loadDisplayConfig, noteRecentConfig} from './runtime.js';
+import {getConfigDirPath, getStateDirPath, loadDisplayConfig, noteRecentConfig, readStateFile} from './runtime.js';
+import {
+	ensureTouchHelperBuilt,
+	formatTouchMapperCommand,
+	listTouchDevices,
+	matchTouchDevice,
+	startTouchMappers,
+	stopTouchMappers
+} from './touch-manager.js';
 
 
 let {ArgumentParser} = argparse;
@@ -478,15 +486,32 @@ function listConfigs(){
 }
 
 
+function getConfiguredMonitorNamesForMonitor(monitor){
+	if(displays == null)
+		return [];
+
+	let matches = [];
+	for(let [name, identity] of Object.entries(getDisplays().monitors)){
+		if(matchesMonitorIdentity(monitor, identity))
+			matches.push(name);
+	}
+	return matches;
+}
+
+
 function getConfigMonitorNames(config){
+	let options = arguments[1] ?? {};
 	let names = [];
 	for(let entry of getConfigMonitorEntries(config)){
 		if(entry.config.enable === false)
 			continue;
 
-		for(let name of entry.config.monitors ?? []){
-			if(!names.includes(name))
-				names.push(name);
+		for(let reference of getNormalizedMonitorReferences(entry.config)){
+			if(options.requiredOnly === true && reference.optional)
+				continue;
+
+			if(!names.includes(reference.name))
+				names.push(reference.name);
 		}
 	}
 	return names;
@@ -495,7 +520,7 @@ function getConfigMonitorNames(config){
 
 function isConfigAvailable(config, displayState){
 	try{
-		for(let name of getConfigMonitorNames(config))
+		for(let name of getConfigMonitorNames(config, {requiredOnly: true}))
 			resolveMonitorName(name, displayState);
 		return true;
 	}catch(err){
@@ -549,6 +574,34 @@ function matchesMonitorIdentity(monitor, identity){
 }
 
 
+function normalizeMonitorReference(reference, logicalMonitorConfig = {}){
+	let defaultOptional = logicalMonitorConfig.optional === true;
+	if(typeof reference == 'string'){
+		return {
+			name: reference,
+			optional: defaultOptional
+		};
+	}
+
+	if(!isPlainObject(reference))
+		throw new Error('Invalid monitor reference: ' + JSON.stringify(reference));
+	if(typeof reference.name != 'string' || reference.name.trim() == '')
+		throw new Error('Monitor reference object must define a name');
+
+	return {
+		name: reference.name,
+		optional: reference.optional == null ? defaultOptional : reference.optional === true
+	};
+}
+
+
+function getNormalizedMonitorReferences(logicalMonitorConfig){
+	return (logicalMonitorConfig.monitors ?? []).map(function(reference){
+		return normalizeMonitorReference(reference, logicalMonitorConfig);
+	});
+}
+
+
 function resolveMonitorName(name, displayState){
 	let identity = getDisplays().monitors[name];
 	if(identity == null)
@@ -564,6 +617,22 @@ function resolveMonitorName(name, displayState){
 		throw new Error('Monitor name matches multiple connected monitors: ' + name);
 
 	return matches[0];
+}
+
+
+function isMonitorNotConnectedError(err){
+	return err instanceof Error && err.message.startsWith('Monitor not connected: ');
+}
+
+
+function resolveConfiguredMonitor(reference, displayState){
+	try{
+		return resolveMonitorName(reference.name, displayState);
+	}catch(err){
+		if(reference.optional && isMonitorNotConnectedError(err))
+			return null;
+		throw err;
+	}
 }
 
 
@@ -817,18 +886,20 @@ function resolveLogicalMonitorEntries(config, displayState){
 	let entries = getConfigMonitorEntries(config).filter(function(entry){
 		return entry.config.enable !== false;
 	});
-	entries = normalizePrimary(sortLogicalMonitorEntries(entries));
+	entries = sortLogicalMonitorEntries(entries);
 
 	let resolvedEntries = [];
 	let resolvedEntriesByName = {};
 
 	for(let entry of entries){
-		let connectedMonitors = entry.config.monitors.map(function(name){
-			return resolveMonitorName(name, displayState);
+		let connectedMonitors = getNormalizedMonitorReferences(entry.config).map(function(reference){
+			return resolveConfiguredMonitor(reference, displayState);
+		}).filter(function(monitor){
+			return monitor != null;
 		});
 
 		if(connectedMonitors[0] == null)
-			throw new Error('Logical monitor has no monitors: ' + entry.name);
+			continue;
 
 		let modeText = null;
 		if(getConfigProperty(entry.config, 'mode') != null)
@@ -859,6 +930,10 @@ function resolveLogicalMonitorEntries(config, displayState){
 		resolvedEntriesByName[resolvedEntry.name] = resolvedEntry;
 	}
 
+	resolvedEntries = normalizePrimary(resolvedEntries);
+	if(resolvedEntries.length == 0)
+		return resolvedEntries;
+
 	return normalizeLogicalMonitorPositions(resolvedEntries);
 }
 
@@ -871,16 +946,158 @@ function normalizePrimary(entries){
 	if(primaryEntries.length > 1)
 		throw new Error('Config declares multiple primary logical monitors');
 
-	if(primaryEntries.length == 0)
-		throw new Error('Config declares no primary logical monitor');
-
 	return entries;
+}
+
+
+function getDesktopBounds(entries){
+	let width = 0;
+	let height = 0;
+	for(let entry of entries){
+		width = Math.max(width, entry.x + entry.width);
+		height = Math.max(height, entry.y + entry.height);
+	}
+	return {width, height};
+}
+
+
+function getAffineMatrixForTransform(transformName){
+	switch(transformName ?? 'normal'){
+		case 'normal':
+			return [1, 0, 0, 0, 1, 0];
+		case '90':
+			return [0, -1, 1, 1, 0, 0];
+		case '180':
+			return [-1, 0, 1, 0, -1, 1];
+		case '270':
+			return [0, 1, 0, -1, 0, 1];
+		case 'flipped':
+			return [-1, 0, 1, 0, 1, 0];
+		case 'flipped-90':
+			return [0, 1, 0, 1, 0, 0];
+		case 'flipped-180':
+			return [1, 0, 0, 0, -1, 1];
+		case 'flipped-270':
+			return [0, -1, 1, -1, 0, 1];
+		default:
+			throw new Error('Unsupported touch transform: ' + transformName);
+	}
+}
+
+
+function composeAffineMatrices(left, right){
+	return [
+		left[0] * right[0] + left[1] * right[3],
+		left[0] * right[1] + left[1] * right[4],
+		left[0] * right[2] + left[1] * right[5] + left[2],
+		left[3] * right[0] + left[4] * right[3],
+		left[3] * right[1] + left[4] * right[4],
+		left[3] * right[2] + left[4] * right[5] + left[5]
+	];
+}
+
+
+function getTouchTransform(entry, touchIdentity){
+	if(touchIdentity.transform != null)
+		return touchIdentity.transform;
+	if(entry.config.touchTransform != null)
+		return entry.config.touchTransform;
+	return getConfigProperty(entry.config, 'transform') ?? 'normal';
+}
+
+
+function getTouchMatrix(entry, desktopBounds, touchIdentity){
+	if(desktopBounds.width <= 0 || desktopBounds.height <= 0)
+		throw new Error('Cannot compute touch matrix without desktop bounds');
+
+	let targetMatrix = [
+		entry.width / desktopBounds.width,
+		0,
+		entry.x / desktopBounds.width,
+		0,
+		entry.height / desktopBounds.height,
+		entry.y / desktopBounds.height
+	];
+	let localMatrix = getAffineMatrixForTransform(getTouchTransform(entry, touchIdentity));
+	return composeAffineMatrices(targetMatrix, localMatrix).map(function(value){
+		return Number.parseFloat(value.toFixed(9));
+	});
+}
+
+
+async function getTouchMappings(config, displayState){
+	let entries = resolveLogicalMonitorEntries(config, displayState);
+	if(entries.length === 0)
+		return [];
+
+	let devices = await listTouchDevices();
+	let desktopBounds = getDesktopBounds(entries);
+	let mappings = [];
+	let usedDevicePaths = new Set();
+
+	for(let entry of entries){
+		for(let reference of getNormalizedMonitorReferences(entry.config)){
+			let touchIdentity = getDisplays().monitors[reference.name]?.touch;
+			if(touchIdentity == null)
+				continue;
+
+			let monitor = resolveConfiguredMonitor(reference, displayState);
+			if(monitor == null)
+				continue;
+
+			let matches = devices.filter(function(device){
+				return matchTouchDevice(device, touchIdentity);
+			});
+			if(matches.length > 1){
+				let touchscreenMatches = matches.filter(function(device){
+					return device.isTouchscreen;
+				});
+				if(touchscreenMatches.length === 1)
+					matches = touchscreenMatches;
+			}
+			if(matches.length === 0)
+				throw new Error('No touch device matched monitor ' + reference.name);
+			if(matches.length > 1)
+				throw new Error('Multiple touch devices matched monitor ' + reference.name);
+
+			let device = matches[0];
+			let devicePath = device.byIdPath ?? device.byPathPath ?? device.eventPath;
+			if(usedDevicePaths.has(devicePath))
+				throw new Error('Touch device matched multiple monitors: ' + devicePath);
+			usedDevicePaths.add(devicePath);
+
+			mappings.push({
+				monitorName: reference.name,
+				logicalMonitorName: entry.name,
+				devicePath,
+				device,
+				matrix: getTouchMatrix(entry, desktopBounds, touchIdentity),
+				virtualDeviceName: 'kdisplay-manager ' + reference.name
+			});
+		}
+	}
+
+	return mappings;
+}
+
+
+async function resolveApplyPlan(name){
+	let config = resolveConfig(name);
+	let displayState = await getDisplayState();
+	return {
+		config,
+		displayState,
+		gdctlArgs: buildSetArgs(config, displayState),
+		touchMappings: await getTouchMappings(config, displayState)
+	};
 }
 
 
 function buildSetArgs(config, displayState){
 	let args = ['set'];
 	let entries = resolveLogicalMonitorEntries(config, displayState);
+	if(entries.length == 0)
+		return [];
 
 	for(let entry of entries){
 		let logicalMonitorConfig = entry.config;
@@ -933,15 +1150,30 @@ function formatCommand(command){
 
 async function runApplyCommand(name, dryRun, options = {}){
 	await ensureDisplaysLoaded(options);
-	let args = await applyConfig(name);
-	let command = ['gdctl', ...args];
+	let plan = await resolveApplyPlan(name);
+	let command = ['gdctl', ...plan.gdctlArgs];
 
-	console.log(formatCommand(command));
+	if(plan.gdctlArgs.length > 0)
+		console.log(formatCommand(command));
 
-	if(!dryRun)
-		await runGdctl(args);
+	let helperBinaryPath = null;
+	if(plan.touchMappings.length > 0)
+		helperBinaryPath = await ensureTouchHelperBuilt();
+	for(let mapping of plan.touchMappings){
+		console.log(formatCommand(formatTouchMapperCommand(helperBinaryPath, mapping)));
+	}
 
-	return args;
+	if(dryRun)
+		return plan;
+
+	if(plan.gdctlArgs.length > 0)
+		await runGdctl(plan.gdctlArgs);
+
+	await startTouchMappers(plan.touchMappings, options.stateDir ?? getStateDirPath());
+	if(plan.touchMappings.length === 0)
+		await stopTouchMappers(options.stateDir ?? getStateDirPath());
+
+	return plan;
 }
 
 
@@ -991,13 +1223,36 @@ function createArgumentParser(){
 		help: 'list saved display configs'
 	});
 	addCommonOptions(listConfigsParser);
+	listConfigsParser.add_argument('--order', {
+		choices: ['recent', 'config'],
+		default: 'config',
+		help: 'order configs by recent use or config file order'
+	});
 	listConfigsParser.add_argument('--json', {
 		action: 'store_true',
 		help: 'print configs as JSON'
 	});
-	listConfigsParser.add_argument('--available', {
+	listConfigsParser.add_argument('--applicable', {
 		action: 'store_true',
 		help: 'only include configs that match connected displays'
+	});
+
+	let listMonitorsParser = subparsers.add_parser('list-monitors', {
+		help: 'list connected monitors'
+	});
+	addCommonOptions(listMonitorsParser);
+	listMonitorsParser.add_argument('--json', {
+		action: 'store_true',
+		help: 'print monitors as JSON'
+	});
+
+	let listTouchDevicesParser = subparsers.add_parser('list-touchscreens', {
+		help: 'list connected touch-capable input devices'
+	});
+	addCommonOptions(listTouchDevicesParser);
+	listTouchDevicesParser.add_argument('--json', {
+		action: 'store_true',
+		help: 'print touch devices as JSON'
 	});
 
 	let applyParser = subparsers.add_parser('apply', {
@@ -1027,38 +1282,123 @@ function parseCommandLine(args){
 		configName: parsed.config_name,
 		isDryRun: parsed.dry_run === true,
 		useJson: parsed.json === true,
-		useAvailable: parsed.available === true
+		useApplicable: parsed.applicable === true,
+		configOrder: parsed.order ?? 'config'
 	};
+}
+
+
+function orderConfigNames(configs, recentNames, order){
+	let names = Object.keys(configs);
+	if(order !== 'recent')
+		return names;
+
+	let ordered = [];
+	let seen = new Set();
+	for(let name of recentNames){
+		if(configs[name] == null || seen.has(name))
+			continue;
+		seen.add(name);
+		ordered.push(name);
+	}
+	for(let name of names){
+		if(seen.has(name))
+			continue;
+		ordered.push(name);
+	}
+	return ordered;
+}
+
+
+function printMonitorSummary(monitors){
+	for(let monitor of monitors){
+		let configuredNames = monitor.configuredNames.length > 0 ? monitor.configuredNames.join(',') : '-';
+		console.log([monitor.port, monitor.vendor ?? '-', monitor.product ?? '-', monitor.serial ?? '-', configuredNames].join('\t'));
+	}
+}
+
+
+function printTouchDeviceSummary(devices){
+	for(let device of devices){
+		console.log('name:\t' + (device.name ?? '-'));
+		console.log('event:\t' + device.eventPath);
+		console.log('by-id:\t' + (device.byIdPath ?? '-'));
+		console.log('vendor/product:\t' + ((device.vendorId ?? '-') + ':' + (device.productId ?? '-')));
+		console.log('serial:\t' + (device.serial ?? '-'));
+		console.log('uniq:\t' + (device.uniq ?? '-'));
+		console.log('path:\t' + (device.path ?? '-'));
+		console.log('size-mm:\t' + ((device.widthMm ?? '-') + 'x' + (device.heightMm ?? '-')));
+		console.log('');
+	}
 }
 
 
 
 async function runCommand(commandLine){
-	let {options, command, configName, isDryRun, useJson, useAvailable} = commandLine;
-	await ensureDisplaysLoaded(options);
+	let {options, command, configName, isDryRun, useJson, useApplicable, configOrder} = commandLine;
 
 	if(command == 'list-configs'){
+		await ensureDisplaysLoaded(options);
 		let configs = listConfigs();
-		if(useAvailable)
+		if(useApplicable)
 			configs = filterAvailableConfigs(configs, await getDisplayState());
+		let recentConfigNames = configOrder === 'recent' ? await readStateFile(options.stateDir) : [];
+		let orderedNames = orderConfigNames(configs, recentConfigNames, configOrder);
 
 		if(!useJson){
-			for(let name of Object.keys(configs))
+			for(let name of orderedNames)
 				console.log(name);
 			return;
 		}
 
-		console.log(JSON.stringify(configs, null, '\t'));
+		let orderedConfigs = {};
+		for(let name of orderedNames)
+			orderedConfigs[name] = configs[name];
+		console.log(JSON.stringify(orderedConfigs, null, '\t'));
+		return;
+	}
+
+	if(command == 'list-monitors'){
+		try{
+			await ensureDisplaysLoaded(options);
+		}catch(err){
+			if(!(err instanceof Error) || !err.message.startsWith('Could not find display manager config file in '))
+				throw err;
+		}
+		let state = await getDisplayState();
+		let monitors = state.monitors.map(function(monitor){
+			return {
+				...monitor,
+				configuredNames: getConfiguredMonitorNamesForMonitor(monitor)
+			};
+		});
+		if(useJson){
+			console.log(JSON.stringify(monitors, null, '\t'));
+			return;
+		}
+		printMonitorSummary(monitors);
+		return;
+	}
+
+	if(command == 'list-touchscreens'){
+		let devices = await listTouchDevices();
+		if(useJson){
+			console.log(JSON.stringify(devices, null, '\t'));
+			return;
+		}
+		printTouchDeviceSummary(devices);
 		return;
 	}
 
 	if(command == 'apply'){
+		await ensureDisplaysLoaded(options);
 		await runApplyCommand(configName, isDryRun, options);
 		if(!isDryRun)
 			await noteRecentConfig(configName, options.stateDir);
 		return;
 	}
 
+	await ensureDisplaysLoaded(options);
 	let state = await getDisplayState();
 	console.log(JSON.stringify(state, null, '\t'));
 }

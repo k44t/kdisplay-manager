@@ -29,7 +29,12 @@ export default {
 		intehill: {
 			vendor: 'HSJ',
 			product: 'U13ZT',
-			serial: '000000000001'
+			serial: '000000000001',
+			touch: {
+				vendorId: '27c6',
+				productId: '0529',
+				serial: '9LQ0172005164'
+			}
 		}
 	},
 	configs: {
@@ -71,6 +76,7 @@ export default {
 		'3 + intehill below center': {
 			extends: '3',
 			'#intehill': {
+				optional: true,
 				below: '#center',
 				mode: '1920x1080',
 				align: 'center'
@@ -88,6 +94,7 @@ export default {
 			extends: 'left + center + mirror capsule right',
 			'#intehill': {
 				below: '#center',
+				monitors: ['intehill', {name: 'dasung', optional: true}],
 				mode: '1920x1080',
 				offsetX: 330
 			}

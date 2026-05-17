@@ -116,7 +116,12 @@ export default {
 		center: {vendor: 'LEN', product: 'C27q-35', serial: 'URHK8MBR'},
 		left: {vendor: 'LEN', product: 'C27q-35', serial: 'URHK8XMS'},
 		right: {vendor: 'LEN', product: 'C27q-35', serial: 'URHK6GDB'},
-		portable: {vendor: 'HSJ', product: 'U13ZT', serial: '000000000001'}
+		portable: {
+			vendor: 'HSJ',
+			product: 'U13ZT',
+			serial: '000000000001',
+			touch: {vendorId: '27c6', productId: '0529', serial: '9LQ0172005164'}
+		}
 	},
 	configs: {
 		base: {
@@ -143,7 +148,7 @@ export default {
             // inherits all defaults and all monitors from base
 			extends: 'base',
 			'#left': {
-				monitors: ['left'],
+				monitors: [{name: 'left', optional: true}],
 				'left-of': '#center',
 				align: 'center'
 			},
@@ -184,6 +189,15 @@ export default {
 				align: 'center'
 			}
 		},
+		optionalWing: {
+			extends: 'base',
+			'#sidecar': {
+				optional: true,
+				monitors: ['right', {name: 'portable', optional: true}],
+				'right-of': '#center',
+				align: 'top'
+			}
+		},
 		mirroredPresentation: {
 			extends: 'base',
 			'#presentation': {
@@ -202,6 +216,19 @@ export default {
 The full real-world sample copied from a live setup is in `sample-config.js`.
 
 `selection-strategy` may be `most-monitors`, `recent`, or `configuration-order`. If omitted, the default is `most-monitors`.
+
+Within a logical monitor's `monitors` array, each entry may be either a string monitor name or an object like `{name: 'left', optional: true}`. Optional monitor refs do not affect applicability, and if they are disconnected they are skipped when applying the config. Setting `optional: true` on the logical monitor itself applies that default to all of its monitor refs.
+
+If a physical monitor has a touchscreen, attach it directly to that monitor entry with a `touch` object. Supported match keys are `vendorId`, `productId`, `serial`, `path`, `name`, `uniq`, `interfaceNumber`, `eventPath`, `byIdPath`, and `byPathPath`. After each successful apply, `kdisplay-manager` computes a normalized affine matrix for the logical monitor rectangle and starts a `uinput` remapper process for each matched touch device.
+
+Useful inspection commands:
+
+```bash
+kdisplay-manager list-configs --order config
+kdisplay-manager list-configs --order recent --applicable
+kdisplay-manager list-monitors --json
+kdisplay-manager list-touchscreens --json
+```
 
 ## Application State
 
