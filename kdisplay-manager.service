@@ -1,7 +1,9 @@
 [Unit]
 Description=KDisplay Manager
-After=graphical-session.target
+# Start only after GNOME has brought up the compositor-side display stack.
+After=graphical-session.target org.gnome.Shell@wayland.service gnome-session-x11-services-ready.target
 Wants=graphical-session.target
+PartOf=graphical-session.target
 
 [Service]
 Type=simple
@@ -10,4 +12,4 @@ Restart=on-failure
 RestartSec=2
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target

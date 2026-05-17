@@ -30,7 +30,8 @@ let DISPLAY_CONFIG_SERVICE = 'org.gnome.Mutter.DisplayConfig';
 let DISPLAY_CONFIG_PATH = '/org/gnome/Mutter/DisplayConfig';
 let DISPLAY_CONFIG_INTERFACE = 'org.gnome.Mutter.DisplayConfig';
 let DEFAULT_DEBOUNCE_MS = 500;
-let DEFAULT_SELF_APPLY_COOLDOWN_MS = 2000;
+let RETRYABLE_RECONCILE_REASONS = new Set(['startup', 'display change']);
+let RETRY_DELAY_MS = 5000;
 
 
 let {ArgumentParser} = argparse;
@@ -94,6 +95,18 @@ function filterMostSpecificConfigNames(configs, availableConfigNames){
 }
 
 
+function getConnectedMonitorSignature(displayState){
+	return displayState.monitors.map(function(monitor){
+		return [
+			monitor.vendor ?? '',
+			monitor.product ?? '',
+			monitor.serial ?? '',
+			monitor.port ?? ''
+		].join('\u0000');
+	}).sort().join('\u0001');
+}
+
+
 class DisplayManagerService {
 	constructor(options){
 		this.options = options;
@@ -107,20 +120,28 @@ class DisplayManagerService {
 		this.displayTimer = null;
 		this.configTimer = null;
 		this.stateTimer = null;
-		this.selfApplyUntil = 0;
+		this.retryTimer = null;
+		this.lastConnectedMonitorSignature = null;
 		this.stopped = false;
 	}
 
 
 	async start(){
 		await this.reloadConfig('startup');
+
+		try{
+			this.bus = dbus.sessionBus();
+			let proxyObject = await this.bus.getProxyObject(DISPLAY_CONFIG_SERVICE, DISPLAY_CONFIG_PATH);
+			let displayConfigInterface = proxyObject.getInterface(DISPLAY_CONFIG_INTERFACE);
+			displayConfigInterface.on('MonitorsChanged', this.onMonitorsChanged.bind(this));
+		}catch(err){
+			this.stop();
+			throw new Error('failed to connect to org.gnome.Mutter.DisplayConfig during startup', {cause: err});
+		}
+
 		this.watchConfigFile();
 		this.watchStateFile();
-
-		this.bus = dbus.sessionBus();
-		let proxyObject = await this.bus.getProxyObject(DISPLAY_CONFIG_SERVICE, DISPLAY_CONFIG_PATH);
-		let displayConfigInterface = proxyObject.getInterface(DISPLAY_CONFIG_INTERFACE);
-		displayConfigInterface.on('MonitorsChanged', this.onMonitorsChanged.bind(this));
+		this.lastConnectedMonitorSignature = getConnectedMonitorSignature(await getDisplayState());
 
 		if(this.bus != null && typeof this.bus.on == 'function'){
 			this.bus.on('error', function(err){
@@ -134,8 +155,13 @@ class DisplayManagerService {
 		console.log('[display-manager service] state dir:', this.options.stateDir);
 		console.log('[display-manager service] state file:', getStateFilePath(this.options.stateDir));
 
-		if(this.options.applyOnStart)
-			await this.reconcile('startup');
+		if(this.options.applyOnStart){
+			try{
+				await this.attemptReconcile('startup');
+			}catch(err){
+				console.error('[display-manager service] startup reconciliation failed:', err);
+			}
+		}
 	}
 
 
@@ -147,6 +173,8 @@ class DisplayManagerService {
 			clearTimeout(this.configTimer);
 		if(this.stateTimer != null)
 			clearTimeout(this.stateTimer);
+		if(this.retryTimer != null)
+			clearTimeout(this.retryTimer);
 		if(this.configWatcher != null)
 			this.configWatcher.close();
 		if(this.stateWatcher != null)
@@ -209,7 +237,7 @@ class DisplayManagerService {
 		}
 
 		if(getApplyOnConfigChange(this.displayConfig))
-			await this.reconcile('config change');
+			await this.attemptReconcile('config change');
 	}
 
 
@@ -241,27 +269,75 @@ class DisplayManagerService {
 			this.watchStateFile();
 		}
 
-		await this.reconcile('state change');
+		await this.attemptReconcile('state change');
 	}
 
 
 	onMonitorsChanged(){
-		if(Date.now() < this.selfApplyUntil)
-			return;
-
 		if(this.displayTimer != null)
 			clearTimeout(this.displayTimer);
 
 		this.displayTimer = setTimeout(function(){
-			this.reconcile('display change').catch(function(err){
+			this.handleDisplayChange().catch(function(err){
 				console.error('[display-manager service] display reconciliation failed:', err);
 			});
 		}.bind(this), DEFAULT_DEBOUNCE_MS);
 	}
 
 
-	async reconcile(reason){
+	async handleDisplayChange(){
 		let displayState = await getDisplayState();
+		let nextSignature = getConnectedMonitorSignature(displayState);
+		if(this.lastConnectedMonitorSignature === nextSignature)
+			return;
+
+		this.lastConnectedMonitorSignature = nextSignature;
+		await this.attemptReconcile('display change', {displayState});
+	}
+
+
+	clearRetry(){
+		if(this.retryTimer != null)
+			clearTimeout(this.retryTimer);
+		this.retryTimer = null;
+	}
+
+
+	scheduleRetry(reason){
+		if(this.stopped || this.retryTimer != null)
+			return;
+
+		console.warn('[display-manager service] retrying', reason, 'in', RETRY_DELAY_MS, 'ms');
+		this.retryTimer = setTimeout(function(){
+			this.retryTimer = null;
+			this.attemptReconcile(reason, {allowRetry: false}).catch(function(err){
+				console.error('[display-manager service] retry failed for', reason + ':', err);
+			});
+		}.bind(this), RETRY_DELAY_MS);
+	}
+
+
+	async attemptReconcile(reason, options = {}){
+		let {
+			allowRetry = RETRYABLE_RECONCILE_REASONS.has(reason),
+			displayState = null
+		} = options;
+
+		try{
+			await this.reconcile(reason, displayState);
+			this.clearRetry();
+		}catch(err){
+			if(allowRetry)
+				this.scheduleRetry(reason);
+			throw err;
+		}
+	}
+
+
+	async reconcile(reason, displayState = null){
+		if(displayState == null)
+			displayState = await getDisplayState();
+
 		let configs = listConfigs();
 		let availableConfigs = filterAvailableConfigs(configs, displayState);
 		let availableConfigNames = Object.keys(availableConfigs);
@@ -289,7 +365,6 @@ class DisplayManagerService {
 		}
 
 		console.log('[display-manager service] applying', configName, 'for', reason);
-		this.selfApplyUntil = Date.now() + DEFAULT_SELF_APPLY_COOLDOWN_MS;
 		await runApplyCommand(configName, false, {
 			configDir: this.options.configDir
 		});

@@ -44,6 +44,8 @@ systemctl --user daemon-reload
 systemctl --user enable --now kdisplay-manager.service
 ```
 
+The provided unit is intended to start with the graphical session and stop when the graphical session ends.
+
 Instead of using the install helper feel free to adapt `kdisplay-manager.service` to your needs.
 
 ## Run
@@ -76,7 +78,7 @@ kdisplay-manager apply <config_name> --state-dir /path/to/state
 
 ### Run the display manager service
 
-For normal use, prefer enabling and starting `kdisplay-manager.service` with `systemd --user` instead of running the service command directly.
+For normal use, prefer enabling and starting `kdisplay-manager.service` with `systemd --user` instead of running the service command directly. The provided unit follows the graphical session lifecycle.
 
 Manual usage:
 
