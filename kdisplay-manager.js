@@ -22,6 +22,7 @@ function createArgumentParser(){
 		help: 'apply a saved display config'
 	});
 	applyParser.add_argument('config_name', {
+		nargs: '?',
 		help: 'display config name'
 	});
 	applyParser.add_argument('--dry-run', {
@@ -86,6 +87,24 @@ function createArgumentParser(){
 		help: 'print touch devices as JSON'
 	});
 
+	let listAudioParser = subparsers.add_parser('list-audio', {
+		help: 'list resolved monitor audio mappings'
+	});
+	listAudioParser.add_argument('config_name', {
+		nargs: '?',
+		help: 'display config name'
+	});
+	listAudioParser.add_argument('--config-dir', {
+		help: 'read display configs from this directory'
+	});
+	listAudioParser.add_argument('--state-dir', {
+		help: 'read and write state in this directory'
+	});
+	listAudioParser.add_argument('--json', {
+		action: 'store_true',
+		help: 'print audio mappings as JSON'
+	});
+
 	let serviceParser = subparsers.add_parser('service', {
 		help: 'run the display manager service'
 	});
@@ -110,7 +129,9 @@ function buildApplyArgs(parsed){
 		args.push('--config-dir', parsed.config_dir);
 	if(parsed.state_dir != null)
 		args.push('--state-dir', parsed.state_dir);
-	args.push('apply', parsed.config_name);
+	args.push('apply');
+	if(parsed.config_name != null)
+		args.push(parsed.config_name);
 	if(parsed.dry_run)
 		args.push('--dry-run');
 	return args;
@@ -131,10 +152,12 @@ function buildDisplayArgs(parsed){
 		if(parsed.json)
 			args.push('--json');
 	}
-	if(parsed.command == 'list-monitors' || parsed.command == 'list-touchscreens'){
+	if(parsed.command == 'list-monitors' || parsed.command == 'list-touchscreens' || parsed.command == 'list-audio'){
 		if(parsed.json)
 			args.push('--json');
 	}
+	if(parsed.command == 'list-audio' && parsed.config_name != null)
+		args.push(parsed.config_name);
 	return args;
 }
 

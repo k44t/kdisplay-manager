@@ -4,12 +4,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {
+	cleanupManagedAudioRenameConfigSync,
+	chooseConfigName,
 	filterAvailableConfigs,
+	filterMostSpecificConfigNames,
 	getDisplayState,
-	getConfigMonitorNames,
 	listConfigs,
 	loadDisplays,
-	matchesMonitorIdentity,
+	resolveApplyPlan,
 	runApplyCommand
 } from './display-manager.js';
 import {
@@ -62,39 +64,6 @@ function parseArgs(args){
 }
 
 
-function chooseConfigName(availableConfigNames, recentConfigNames, selectionStrategy){
-	if(selectionStrategy === 'configuration-order')
-		return availableConfigNames[0] ?? null;
-
-	let availableConfigSet = new Set(availableConfigNames);
-	for(let name of recentConfigNames){
-		if(availableConfigSet.has(name))
-			return name;
-	}
-
-	return availableConfigNames[0] ?? null;
-}
-
-
-function getConfigMonitorCount(config){
-	return getConfigMonitorNames(config, {requiredOnly: true}).length;
-}
-
-
-function filterMostSpecificConfigNames(configs, availableConfigNames){
-	let maxMonitorCount = null;
-	for(let name of availableConfigNames){
-		let monitorCount = getConfigMonitorCount(configs[name]);
-		if(maxMonitorCount == null || monitorCount > maxMonitorCount)
-			maxMonitorCount = monitorCount;
-	}
-
-	return availableConfigNames.filter(function(name){
-		return getConfigMonitorCount(configs[name]) === maxMonitorCount;
-	});
-}
-
-
 function getConnectedMonitorSignature(displayState){
 	return displayState.monitors.map(function(monitor){
 		return [
@@ -102,6 +71,18 @@ function getConnectedMonitorSignature(displayState){
 			monitor.product ?? '',
 			monitor.serial ?? '',
 			monitor.port ?? ''
+		].join('\u0000');
+	}).sort().join('\u0001');
+}
+
+
+function getTouchMappingSignature(plan){
+	return plan.touchMappings.map(function(mapping){
+		return [
+			mapping.monitorName ?? '',
+			mapping.logicalMonitorName ?? '',
+			mapping.devicePath ?? '',
+			mapping.matrix.join(' ')
 		].join('\u0000');
 	}).sort().join('\u0001');
 }
@@ -122,6 +103,8 @@ class DisplayManagerService {
 		this.stateTimer = null;
 		this.retryTimer = null;
 		this.lastConnectedMonitorSignature = null;
+		this.lastAppliedConfigName = null;
+		this.lastTouchMappingSignature = null;
 		this.stopped = false;
 	}
 
@@ -181,6 +164,7 @@ class DisplayManagerService {
 			this.stateWatcher.close();
 		if(this.bus != null)
 			this.bus.disconnect();
+		cleanupManagedAudioRenameConfigSync();
 	}
 
 
@@ -288,11 +272,39 @@ class DisplayManagerService {
 	async handleDisplayChange(){
 		let displayState = await getDisplayState();
 		let nextSignature = getConnectedMonitorSignature(displayState);
-		if(this.lastConnectedMonitorSignature === nextSignature)
+		if(this.lastConnectedMonitorSignature === nextSignature){
+			await this.reconcileTouchForCurrentConfig(displayState);
 			return;
+		}
 
 		this.lastConnectedMonitorSignature = nextSignature;
 		await this.attemptReconcile('display change', {displayState});
+	}
+
+
+	async reconcileTouchForCurrentConfig(displayState = null){
+		if(this.lastAppliedConfigName == null)
+			return;
+		if(displayState == null)
+			displayState = await getDisplayState();
+
+		let plan = await resolveApplyPlan(this.lastAppliedConfigName, {
+			configDir: this.options.configDir,
+			stateDir: this.options.stateDir,
+			displayState
+		});
+		let nextSignature = getTouchMappingSignature(plan);
+		if(this.lastTouchMappingSignature === nextSignature)
+			return;
+
+		console.log('[display-manager service] reconciling touch devices for', this.lastAppliedConfigName);
+		plan = await runApplyCommand(this.lastAppliedConfigName, false, {
+			configDir: this.options.configDir,
+			stateDir: this.options.stateDir,
+			displayState,
+			applyDisplay: false
+		});
+		this.lastTouchMappingSignature = getTouchMappingSignature(plan);
 	}
 
 
@@ -345,6 +357,8 @@ class DisplayManagerService {
 		let knownConfigNames = new Set(Object.keys(configs));
 
 		if(availableConfigNames.length == 0){
+			this.lastAppliedConfigName = null;
+			this.lastTouchMappingSignature = null;
 			console.log('[display-manager service] no applicable config for', reason);
 			return;
 		}
@@ -360,15 +374,20 @@ class DisplayManagerService {
 
 		let configName = chooseConfigName(availableConfigNames, recentConfigNames, selectionStrategy);
 		if(configName == null){
+			this.lastAppliedConfigName = null;
+			this.lastTouchMappingSignature = null;
 			console.log('[display-manager service] no config selected for', reason);
 			return;
 		}
 
 		console.log('[display-manager service] applying', configName, 'for', reason);
-		await runApplyCommand(configName, false, {
+		let plan = await runApplyCommand(configName, false, {
 			configDir: this.options.configDir,
-			stateDir: this.options.stateDir
+			stateDir: this.options.stateDir,
+			displayState
 		});
+		this.lastAppliedConfigName = plan.configName;
+		this.lastTouchMappingSignature = getTouchMappingSignature(plan);
 	}
 }
 
